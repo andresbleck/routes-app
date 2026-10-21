@@ -30,10 +30,15 @@ A React + Django web app that helps a truck driver pick the safest route. It com
 - Each checkpoint represents half the road to its neighbours (`segment_miles`). These add up exactly to the route distance and are used for "miles per risk level".
 
 ### Weather
-- [Open-Meteo](https://open-meteo.com/) hourly forecast (no API key), in mph and inches, many locations per request (batches of 100, sent in parallel).
+- [Open-Meteo](https://open-meteo.com/) hourly forecast (no API key), in mph and inches, up to 100 locations per request.
+- **Fetched by the browser.** Open-Meteo's free tier is limited per IP, and the shared outbound IPs of cloud hosts (Render here) are often already over it (HTTP 429). So the plan is computed in two steps:
+  1. `POST /api/trips/plan` — the backend computes routes, checkpoints and the heatmap grid, keeps them for 30 minutes and returns the exact Open-Meteo URLs to fetch.
+  2. The browser fetches those URLs (2–3 requests, from the user's own IP) and posts the raw responses to `POST /api/trips/plan/{plan_id}/weather`, where the backend validates them and computes risk, ranking and the heatmap.
+
+  All weather logic (variables, units, parsing, risk) stays in the backend; the browser only relays data. Checkpoint and grid locations are deduplicated (~1 km rounding) before building the URLs.
 - **Wind uses gusts** (`wind_gusts_10m`), the conservative choice for high-profile vehicles. Sustained wind is shown for reference.
 - **Rain** = `rain + showers` (in/hr). **Snow** = `snowfall` (in/hr). Open-Meteo's hourly precipitation is the amount over the preceding hour.
-- The forecast hour closest to each checkpoint's ETA is used.
+- The forecast hour closest to each checkpoint's ETA is used. If the forecast ends before a needed hour, the last hour is reused and the response warns about it.
 
 ### Risk rules
 
@@ -70,7 +75,7 @@ Values are rounded before comparing (miles to 0.1, average risk to 0.01, time to
 
 `GET /api/geocode?q=denv` → `{"results": [{"label": "Denver, CO", "lat": 39.738453, "lon": -104.984853}, …]}`
 
-`POST /api/trips/plan`
+**Step 1** — `POST /api/trips/plan`
 
 ```json
 {
@@ -81,6 +86,15 @@ Values are rounded before comparing (miles to 0.1, average risk to 0.01, time to
   "interval_miles": "auto"
 }
 ```
+
+```json
+{
+  "plan_id": "3f2b9c1e-…",
+  "weather_urls": ["https://api.open-meteo.com/v1/forecast?latitude=32.78,…&longitude=-96.8,…&hourly=wind_speed_10m,wind_gusts_10m,rain,showers,snowfall&wind_speed_unit=mph&precipitation_unit=inch&…"]
+}
+```
+
+**Step 2** — the browser fetches every URL and posts the locations, in order: `POST /api/trips/plan/{plan_id}/weather` with `{"locations": [{"hourly": {…}}, …]}`.
 
 Response (abridged):
 
@@ -122,17 +136,17 @@ Response (abridged):
 }
 ```
 
-Errors: `400` with per-field messages, `422 {"code": "no_route"}` when no truck route exists, `502 {"code": "upstream_error", "provider": …}` when TomTom or Open-Meteo fails.
+Errors: `400` with per-field messages (including malformed or incomplete weather in step 2), `404 {"code": "plan_expired"}` when step 2 arrives after 30 minutes, `422 {"code": "no_route"}` when no truck route exists, `502 {"code": "upstream_error", "provider": "tomtom"}` when TomTom fails.
 
 ## Assumptions and design decisions
-- **Providers.** TomTom for routing and geocoding (truck mode with weight, real alternatives on long trips, free key without a card). OpenRouteService was ruled out because its hosted API only computes alternatives for trips under 100 km. Open-Meteo for weather. Esri World Light Gray tiles for the base map (CARTO now requires a key).
+- **Providers.** TomTom for routing and geocoding (truck mode with weight, real alternatives on long trips, free key without a card). OpenRouteService was ruled out because its hosted API only computes alternatives for trips under 100 km. Open-Meteo for weather, fetched by the browser (see Weather): WeatherAPI.com was tried as a server-side alternative, but it needs one request per location and serves ~3–10 requests/s, which made a search take 30 s or more. Esri World Light Gray tiles for the base map (CARTO now requires a key).
 - **Continuous driving.** ETAs follow TomTom's driving time with traffic for the departure time; hours-of-service breaks and stops are not modelled.
 - **Gross vs. load weight.** Routing uses load + 35,000 lb assumed tare; the risk rules use the load weight entered by the user, as the brief states.
 - **US trips.** Place search is limited to the US, consistent with the miles / inches / lb units.
 - **Departure window.** From 1 h ago to 7 days ahead, so the trip plus the 48 h heatmap stay within Open-Meteo's forecast range.
 - **Times.** The API works in UTC; the UI shows the browser's local time.
-- **Stateless backend.** No database. Forecasts are cached in memory per point for 30 minutes.
-- **Open-Meteo free tier** counts every location as one call (~10,000 / day). A new search asks for the checkpoints of the three routes plus up to 150 grid points (roughly 100–300 locations); repeated or similar searches mostly hit the cache.
+- **No database.** A plan prepared in step 1 waits in the in-memory cache for 30 minutes, so the API runs as one Gunicorn process with threads (on several processes or instances it would need a shared cache such as Redis).
+- **Open-Meteo free tier** counts every location as one call (~10,000 / day per IP). A search asks for the checkpoints of the three routes plus up to 150 grid points (roughly 100–300 locations), from the user's own IP.
 - **Geometry.** Polylines are simplified (~50 m tolerance) before being sent to the browser; sampling and risk use the full-resolution route.
 
 ## Project structure
@@ -147,10 +161,10 @@ backend/                      Django + Django REST Framework
       ranking.py              route summaries and recommendation
       route_geometry.py       detour points, route overlap
       heatmap_grid.py         corridor grid
-    clients/                  tomtom.py, open_meteo.py (HTTP only)
+    clients/                  tomtom.py (HTTP), open_meteo.py (URLs + parsing)
     services/                 route_options.py, trip_planner.py (orchestration)
     serializers.py, views.py  request validation and endpoints
-    tests/                    pytest suite (152 tests, providers mocked)
+    tests/                    pytest suite (165 tests, providers mocked)
 frontend/                     React + Vite + TypeScript + Tailwind + shadcn/ui
   src/
     api/                      typed client for the API contract
@@ -189,7 +203,7 @@ cd backend
 pytest
 ```
 
-152 tests cover every threshold boundary and load rule, checkpoint placement and ETA interpolation, each ranking criterion and tie-break, the detour fallback, the heatmap grid, both API clients (HTTP mocked) and the endpoints' contract, validation and errors. Frontend checks: `npm run build` (TypeScript) and `npm run lint`.
+165 tests cover every threshold boundary and load rule, checkpoint placement and ETA interpolation, each ranking criterion and tie-break, the detour fallback, the heatmap grid, the TomTom client (HTTP mocked), Open-Meteo URL building and parsing, and both plan steps end to end (contract, validation, expired plans, malformed weather, errors). Frontend checks: `npm run build` (TypeScript) and `npm run lint`.
 
 ## Deploy
 

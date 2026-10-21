@@ -8,8 +8,9 @@ services:
     plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    # Threads let one worker serve other requests while waiting on TomTom / Open-Meteo.
-    startCommand: gunicorn config.wsgi --workers 2 --threads 4 --timeout 120
+    # One process: a plan prepared by the first request waits in its in-memory
+    # cache for the browser to post the weather. Threads serve requests in parallel.
+    startCommand: gunicorn config.wsgi --workers 1 --threads 8 --timeout 120
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION

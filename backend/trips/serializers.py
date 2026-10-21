@@ -45,5 +45,10 @@ class TripPlanRequestSerializer(serializers.Serializer):
         return data
 
 
+class TripWeatherSerializer(serializers.Serializer):
+    # Open-Meteo locations as fetched by the browser: [{"hourly": {...}}, ...]
+    locations = serializers.ListField(child=serializers.DictField(), allow_empty=False)
+
+
 class GeocodeQuerySerializer(serializers.Serializer):
     q = serializers.CharField(min_length=2, max_length=200)

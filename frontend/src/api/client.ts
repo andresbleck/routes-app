@@ -52,6 +52,50 @@ export async function searchPlaces(query: string, signal?: AbortSignal): Promise
   return results
 }
 
-export function planTrip(trip: TripPlanRequest, signal?: AbortSignal): Promise<TripPlan> {
-  return request('/api/trips/plan', { method: 'POST', body: JSON.stringify(trip), signal })
+/**
+ * Plans a trip in three steps. The backend computes routes and checkpoints and
+ * returns Open-Meteo URLs; the browser fetches the weather (Open-Meteo limits
+ * its free tier per IP, and cloud servers' shared IPs are often over it); the
+ * backend then computes risk, ranking and the heatmap from that weather.
+ */
+export async function planTrip(trip: TripPlanRequest, signal?: AbortSignal): Promise<TripPlan> {
+  const pending = await request<{ plan_id: string; weather_urls: string[] }>('/api/trips/plan', {
+    method: 'POST',
+    body: JSON.stringify(trip),
+    signal,
+  })
+  const locations = await fetchWeather(pending.weather_urls, signal)
+  return request(`/api/trips/plan/${pending.plan_id}/weather`, {
+    method: 'POST',
+    body: JSON.stringify({ locations }),
+    signal,
+  })
+}
+
+/** Fetches the Open-Meteo URLs in parallel; returns one location per point, in order. */
+async function fetchWeather(urls: string[], signal?: AbortSignal): Promise<Array<{ hourly: unknown }>> {
+  const batches = await Promise.all(
+    urls.map(async (url) => {
+      let response: Response
+      try {
+        response = await fetch(url, { signal })
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') throw error
+        throw new ApiError(0, 'Cannot reach the weather service (Open-Meteo). Check your connection and try again.')
+      }
+      if (!response.ok) {
+        throw new ApiError(
+          response.status,
+          response.status === 429
+            ? 'The weather service is limiting requests from this network. Please try again in a minute.'
+            : 'The weather service is unavailable. Please try again in a moment.',
+        )
+      }
+      const body: unknown = await response.json()
+      // A single location comes back as an object, several as an array.
+      return Array.isArray(body) ? body : [body]
+    }),
+  )
+  // Send only the hourly data the backend needs.
+  return batches.flat().map((location) => ({ hourly: (location as { hourly: unknown }).hourly }))
 }
