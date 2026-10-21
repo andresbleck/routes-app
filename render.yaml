@@ -1,0 +1,38 @@
+# Render Blueprint: Django API (web service) + React app (static site).
+# New > Blueprint in the Render dashboard, pick this repo, then fill in the
+# values marked `sync: false` when prompted (see README > Deploy to Render).
+services:
+  - type: web
+    name: routes-app-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # Threads let one worker serve other requests while waiting on TomTom / Open-Meteo.
+    startCommand: gunicorn config.wsgi --workers 2 --threads 4 --timeout 120
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: TOMTOM_API_KEY
+        sync: false
+      # The static site's URL, e.g. https://routes-app-web.onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+  - type: web
+    name: routes-app-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: NODE_VERSION
+        value: 22.12.0
+      # The API's URL, e.g. https://routes-app-api.onrender.com (read at build time)
+      - key: VITE_API_BASE_URL
+        sync: false
