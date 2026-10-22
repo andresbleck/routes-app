@@ -5,6 +5,7 @@ from environment variables so the same settings work locally and on Render.
 """
 
 import os
+import tempfile
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -61,9 +62,12 @@ STATIC_URL = "static/"
 
 DATABASES = {}
 
+# A plan prepared in step 1 is read back in step 2, possibly by another
+# Gunicorn worker, so the cache lives on disk rather than in process memory.
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+        "LOCATION": Path(tempfile.gettempdir()) / "routes-app-cache",
         "TIMEOUT": 30 * 60,
     }
 }

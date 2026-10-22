@@ -145,7 +145,7 @@ Errors: `400` with per-field messages (including malformed or incomplete weather
 - **US trips.** Place search is limited to the US, consistent with the miles / inches / lb units.
 - **Departure window.** From 1 h ago to 7 days ahead, so the trip plus the 48 h heatmap stay within Open-Meteo's forecast range.
 - **Times.** The API works in UTC; the UI shows the browser's local time.
-- **No database.** A plan prepared in step 1 waits in the in-memory cache for 30 minutes, so the API runs as one Gunicorn process with threads (on several processes or instances it would need a shared cache such as Redis).
+- **No database.** A plan prepared in step 1 waits 30 minutes in Django's file-based cache (`/tmp`), shared by all Gunicorn workers on the instance. Scaling to several instances would need a shared cache such as Redis.
 - **Open-Meteo free tier** counts every location as one call (~10,000 / day per IP). A search asks for the checkpoints of the three routes plus up to 150 grid points (roughly 100–300 locations), from the user's own IP.
 - **Geometry.** Polylines are simplified (~50 m tolerance) before being sent to the browser; sampling and risk use the full-resolution route.
 
